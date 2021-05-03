@@ -1,0 +1,828 @@
+---
+title: "Hierarchical Modeling With Animated Plots"
+author: "Rob Kravec"
+date: "4/22/2021"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+library(tidyverse)
+library(stringr)
+library(lme4)
+library(knitr)
+library(gganimate)
+library(ggdist)
+library(arm)
+library(patchwork)
+```
+
+## Introduction
+
+The famous statistician and founder of the sabermetrics movement in baseball,
+Bill James, found that winning percentage 
+($\frac{\text{wins}}{\text{games played}}$) has
+a strong linear relationship with a simple function of a team's runs scored and
+runs allowed in a given year. That relationship, coined as the "pythagorean 
+expectation" was originally represented as 
+$\frac{\text{runs scored}^{2}}{\text{runs scored}^{2} + \text{runs allowed}^{2}}$.
+The exponents in this expression have since been amended to create an even 
+stronger relationship with winning percentage (i.e., changing all powers of 2 
+to ~ 1.83), and we will proceed with the amended version:
+$\frac{\text{runs scored}^{1.83}}{\text{runs scored}^{1.83} + \text{runs allowed}^{1.83}}$
+
+This pythagorean expectation can be used in retrospective analyses to see which
+teams overperformed relative to their runs scored and runs allowed (i.e., 
+pythagorean expectation < winning percentage) vs. which teams underperformed
+(i.e, pythagorean expectation > winning percentage). One can then ask the 
+question: Are there teams that chronically overperform or underperform? 
+
+To assess this question, we'll use 20 Major League Baseball seasons' worth of
+data from Fangraphs and build some simple models. Baseball (and sports in
+general) provides ample opportunity to consider nested hierarchical structures 
+(e.g., players within teams, teams within divisions, divisions within
+leagues), so we'll evaluate whether these structures are helpful in our models. 
+
+## EDA
+
+First, we should be transparent about a few data processing steps:
+
+- Fangraphs provides batting and pitching statistics separately. To create
+a single dataframe with both runs scored and runs allowed, we simply download
+and join two CSV files and get a 100% match rate on the join (by team and season)
+- Four teams changed names during the 20 year period under consideration 
+(2000-2019). To maintain a total of 30 unique teams for this analysis, previous
+team names were re-coded to match current team names (e.g., Florida Marlins was
+re-coded to Miami Marlins)
+- The Houston Astros changed divisions in 2013, and our data reflects that
+change (e.g., NL Central before 2013 and AL West starting in 2013)
+
+```{r load-data}
+# Load data files
+batting <- read_csv('Batting2.csv')
+pitching <- read_csv('Pitching2.csv')
+
+# Keep only columns relevant to this analysis
+batting_small <- batting %>% 
+  mutate(Runs_scored = R) %>% 
+  dplyr::select(Season, Team, Runs_scored)
+pitching_small <- pitching %>% 
+  mutate(Runs_allowed = R,
+         Win_perc = W / (W + L)) %>% 
+  dplyr::select(Season, Team, Runs_allowed, W, L, Win_perc)
+
+# Join data
+combined <- left_join(x = pitching_small, y = batting_small,
+                      by = c("Team", "Season"))
+
+# Recode some team names
+combined$Team <- recode(combined$Team, FLA = "MIA")
+combined$Team <- recode(combined$Team, ANA = "LAA")
+combined$Team <- recode(combined$Team, MON = "WSN")
+combined$Team <- recode(combined$Team, TBD = "TBR")
+
+### Add relevant features
+## Division
+combined <- combined %>% 
+  mutate(Division = case_when(
+    (Team == "ATL" | Team == "PHI" | Team == "MIA" |
+      Team == "WSN" | Team == "NYM") ~ "NL East",
+    (Team == "CIN" | Team == "STL" | Team == "CHC" |
+      Team == "MIL" | Team == "PIT") ~ "NL Central",
+    (Team == "LAD" | Team == "SDP" | Team == "SFG" |
+      Team == "COL" | Team == "ARI") ~ "NL West",
+    (Team == "BOS" | Team == "BAL" | Team == "TOR" |
+      Team == "TBR" | Team == "NYY") ~ "AL East",
+    (Team == "MIN" | Team == "CHW" | Team == "CLE" |
+      Team == "KCR" | Team == "DET") ~ "AL Central",
+    (Team == "HOU" | Team == "LAA" | Team == "TEX" |
+      Team == "SEA" | Team == "OAK") ~ "AL West"
+  ),
+  Team = as.factor(Team))
+# Account for fact that Astros switched divisions in 2013
+combined$Division <- ifelse(combined$Team == "HOU" & combined$Season < 2013,
+                            "NL Central", combined$Division)
+
+## League
+combined$League <- str_sub(combined$Division, start = 1, end = 2)
+
+## Pythagorean expectation
+combined$Pythagorean <- 
+  1 / (1 + (combined$Runs_allowed / combined$Runs_scored) ^ 1.83)
+
+## Remove unnecessary tables
+rm(batting, batting_small, pitching, pitching_small)
+```
+
+Jumping into our exploratory data analysis, we are first interested in 
+confirming that the pythagorean expectation is as good as advertised in terms
+of describing variance in winning percentage. Below, we see that this 
+relationship is indeed very strong and linear. 
+
+```{r aggregate-plot, fig.height = 2.5}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. Pythagorean expectation") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+When looking at individual teams, however, we can see differences in 
+the orientations of the best-fit lines. For instance, the New York Yankees and 
+Toronto Blue Jays appear to have best-fit lines with smaller slopes than those
+of the Kansas City Royals and Baltimore Orioles.
+
+```{r team-plot}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~ Team) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. Pythagorean Expectation by Team") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+While we originally had aspirations of building a hierarchical model with
+multiple layers of nesting structure, we see that the relationship between
+winning percentage and pythagorean expectation is approximately identical 
+across divisions. Though not pictured, the same can be said when aggregating the 
+data even further to the league level (i.e., American League vs. National League).
+
+```{r division-plot}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~ Division) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. pythagorean expectation by division") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r League-plot, eval = F}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~ League) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. Pythagorean expectation by league") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Models and results
+
+As noted earlier in this analysis, our data has a natural grouping structure 
+with multiple observations (Seasons) for each team, which belong to divisions,
+which belong to leagues. Based on our EDA, we have reason to believe that
+the relationship between winning percentage and pythagorean expectation may be
+meaningfully different by team but likely not by division or league. For now,
+let's consider only grouping by the `Team` variable.
+
+As is common in hierarchical modeling contexts, we'll consider 3 different
+model types and compare their results. To clarify notation used in model 
+specifications, $y$ denotes winning percentage, $x$ denotes pythagorean expectation,
+subscript $i$ corresponds to an observation, and subscript $j$ corresponds to 
+a team.
+
+- Pooled model: $y_i = \beta_0 + \beta_1x_i + \epsilon_{i}$
+  - Lumps all data together and ignores the fact that any natural groupings
+  exist
+- Unpooled model: $y_{ij} = \beta_{0j} + \beta_{1j}x_{ij} + \epsilon_{ij}$
+  - Fits a separate model for each team, ignoring any similarities
+- Hierarchical model (shown below)
+  - Allows for partial pooling of information across teams, pulling extreme
+  values of coefficients toward the population average and reducing variance
+  in coefficient estimates
+  - In this case, we specify random intercepts and slopes by team
+
+$$
+\begin{aligned}
+y_{ij} = \beta_0 + b_{0j} + \beta_1 + b_{1j} + \epsilon_{ij} \\
+\begin{pmatrix} b_{0j} & b_{1j} \end{pmatrix} ^ T \sim N_2(0, \Sigma) \\
+\epsilon_{ij} \sim N(0, \sigma^2) \\
+b_{0j}, b_{1j} \perp \!\!\! \perp \epsilon_{ij}
+\end{aligned}
+$$
+
+Lastly, before fitting any models, we note that some may object to us
+considering winning percentage as a continuous numeric response, as opposed 
+to modeling wins and losses with a generalized linear model, which would view
+individual games as Bernoulli trials. We are comfortable proceeding with 
+winning percentage as a continuous dependent variable because values are
+entirely contained in the 0.25 - 0.75 range. As a result, we have little to fear
+in terms of a linear regression predicting values of the response that are 
+outside of the acceptable 0 - 1 range.
+
+In an attempt to share results in a manner that is both clear and engaging, we
+will make use of the `gganimate` package. The slope estimate for the pooled
+model is shown with a vertical dashed red line, while 95% confidence intervals
+for the team-level slope estimates are shown for the unpooled and hierarchical
+models. The subtitle of the plot denotes which coefficient estimates (unpooled
+or hierarchical) are being shown at any one time.
+
+```{r pooled-model}
+mod1 <- lm(Win_perc ~ Pythagorean, data = combined)
+pooled_df <- data.frame(Intercept = coef(mod1)[[1]],
+                      Slope = coef(mod1)[[2]],
+                      Slope_se = summary(mod1)[[4]][4]) %>% 
+  mutate(Slope_lower = Slope - 2 * Slope_se,
+         Slope_upper = Slope + 2 * Slope_se)
+```
+
+```{r unpooled-models}
+# Write function for unpooled regression (by team)
+unpooled <- function(team) {
+  dat <- combined %>% 
+    filter(Team == team)
+  mod <- lm(Win_perc ~ Pythagorean, data = dat)
+  df <- data.frame(Team = team,
+                   Intercept = coef(mod)[[1]],
+                   Slope = coef(mod)[[2]],
+                   Slope_se = summary(mod)[[4]][4]) %>% 
+    mutate(Slope_lower = Slope - 2 * Slope_se,
+           Slope_upper = Slope + 2 * Slope_se)
+  return(df)
+}
+
+# Define unique teams
+teams <- unique(combined$Team)
+
+# Find unpooled regression coefficients
+unpooled_df <- map_df(.x = teams, .f = unpooled)
+
+# Add identifier that will be helpful for animation
+unpooled_df <- unpooled_df %>% 
+  mutate(Type = "Unpooled")
+```
+
+```{r plot-pooled-vs-unpooled}
+unpooled_plot <- ggplot() +
+  geom_vline(mapping = aes(xintercept = pooled_df$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(data = unpooled_df, 
+                     mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  labs(x = "Slope estimate", title = "Unpooled slope estimates",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  coord_cartesian(xlim = c(0.2, 1.7))
+```
+
+```{r team-random-effects}
+# Fit model with random slopes and intercepts by Team
+mod2 <- lmer(Win_perc ~ (1 + Pythagorean | Team), data = combined)
+
+# Extract random effects and slope standard error
+std_errs <- se.ranef(mod2)[[1]][,2]
+slope_res <- ranef(mod2)[[1]][,2]
+intercept_res <- ranef(mod2)[[1]][,1]
+teams <- unique(combined$Team) %>% sort()
+
+# Create data frame that will be helpful for plotting
+mod2_df <- data.frame(Team = teams,
+                      Intercept = intercept_res,
+                      Slope = slope_res,
+                      Slope_se = std_errs,
+                      Slope_lower = slope_res - 2 * std_errs,
+                      Slope_upper = slope_res + 2 * std_errs,
+                      Type = "Hierarchical")
+
+# Plot result
+hierarchical_plot <- ggplot(data = mod2_df) +
+  geom_vline(mapping = aes(xintercept = pooled_df$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  labs(title = "Multilevel model slope estimates",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank()) +
+  coord_cartesian(xlim = c(0.2, 1.7))
+
+# Display patchwork plot
+#unpooled_plot + hierarchical_plot
+```
+
+```{r animated-plot}
+# Create data frames for animated plotting
+anim_df <- rbind(unpooled_df, mod2_df)
+pooled_df <- rbind(pooled_df, pooled_df) %>% 
+  mutate(Type = c("Unpooled", "Hierarchical"))
+
+# Create animated plot
+anim_plot <- ggplot() +
+  geom_vline(mapping = aes(xintercept = pooled_df$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(data = anim_df, 
+                     mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  transition_states(Type, transition_length = 3, state_length = 1) +
+  labs(x = "Slope estimate", title = "Slope estimates by model type",
+       subtitle = "Model type: {closest_state}",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank())
+
+# Display animation
+animate(anim_plot, fps = 10, end_pause = 25)
+```
+
+```{r check-for-larger-ci}
+unpooled_df2 <- unpooled_df %>% 
+  mutate(ci_width_unpooled = Slope_upper - Slope_lower) %>% 
+  dplyr::select(Team, Slope, ci_width_unpooled)
+mod2_df2 <- mod2_df %>% 
+  mutate(ci_width_hierarchy = Slope_upper - Slope_lower) %>% 
+  dplyr::select(Team, ci_width_hierarchy)
+compare_ci <- left_join(x = unpooled_df2, y = mod2_df2, by = "Team") %>% 
+  mutate(ind = ifelse(ci_width_hierarchy > ci_width_unpooled, 1, 0))
+```
+
+On aggregate, we observe the expected result. The confidence intervals of the
+slope estimates tend to shrink in the hierarchical model (relative to the
+unpooled models), and the point estimates tend to move toward the population
+estimate. As a result, a slightly greater number of the team-level slope 
+confidence intervals contains the population estimate under the hierarchical
+model. These phenomena are governed by the partial pooling of information
+that we discussed earlier.
+
+However, we also observe a couple of unexpected (and slightly troubling) results:
+
+- For a non-negligible number of teams (10 of 30), the confidence interval
+actually increases slightly in the hierarchical model
+- Slope point estimates for some teams actually move further away from the 
+population estimate and/or cross from one side of the population estimate over
+to the other
+
+It is my belief that these unintuitive results stem from the hierarchical 
+model's attempt to balance slope estimates (and their corresponding variances)
+across teams. Typically, this balancing would result in a shrinkage in variance
+across the board and gradual movement toward the observed population mean. 
+However, in this case, the extremely linear relationship between winning 
+percentage and pythagorean expectation may be causing havoc with this 
+re-balancing process. An additional proof point for this hypothesis can be
+gleaned from a Normal Q-Q plot of the hierarchical model residuals, which
+shows that although the residuals appear to have a "normal" shape, the tails
+of the distribution are WAY shorter than expected. In essence, winning 
+percentage is being predicted too well by the pythagorean expectation to 
+satisfy the assumptions in the normal model.
+
+```{r qq-plot, fig.height = 3.5}
+qqnorm(resid(mod2))
+```
+
+Often, these types of model issues are exacerbated when sample sizes are low. 
+As an educational experiment, we reproduce the same animated plot of slope
+estimates below with 10 seasons of data per team instead of the original 20.
+As expected, we observe similar results compared to the data with 20 seasons.
+On aggregate, we see a reduction in confidence interval width and shrinkage
+of estimates toward the population estimate. However, the "unintuitive" results
+are more perceptible. To highlight two example, the confidence intervals for the 
+New York Mets and Los Angeles Angels noticeably increase as the animation moves
+from the unpooled estimates to the hierarchical model estimates.
+
+```{r filter-10-seasons}
+combined_2 <- combined %>% 
+  filter(Season >= 2010)
+```
+
+```{r 10-seasons-plot}
+# Pooled model
+mod1_2 <- lm(Win_perc ~ Pythagorean, data = combined_2)
+pooled_df_2 <- data.frame(Intercept = coef(mod1_2)[[1]],
+                      Slope = coef(mod1_2)[[2]],
+                      Slope_se = summary(mod1_2)[[4]][4]) %>% 
+  mutate(Slope_lower = Slope - 2 * Slope_se,
+         Slope_upper = Slope + 2 * Slope_se)
+
+# Unpooled model
+unpooled_2 <- function(team) {
+  dat <- combined_2 %>% 
+    filter(Team == team)
+  mod <- lm(Win_perc ~ Pythagorean, data = dat)
+  df <- data.frame(Team = team,
+                   Intercept = coef(mod)[[1]],
+                   Slope = coef(mod)[[2]],
+                   Slope_se = summary(mod)[[4]][4]) %>% 
+    mutate(Slope_lower = Slope - 2 * Slope_se,
+           Slope_upper = Slope + 2 * Slope_se)
+  return(df)
+}
+
+# Find unpooled regression coefficients
+unpooled_df_2 <- map_df(.x = teams, .f = unpooled_2) %>% 
+  mutate(Type = "Unpooled")
+
+# Hierarchical model
+mod2_2 <- lmer(Win_perc ~ (1 + Pythagorean | Team), data = combined_2)
+std_errs_2 <- se.ranef(mod2_2)[[1]][,2]
+slope_res_2 <- ranef(mod2_2)[[1]][,2]
+intercept_res_2 <- ranef(mod2_2)[[1]][,1]
+teams_2 <- unique(combined_2$Team) %>% sort()
+mod2_df_2 <- data.frame(Team = teams_2,
+                      Intercept = intercept_res_2,
+                      Slope = slope_res_2,
+                      Slope_se = std_errs_2,
+                      Slope_lower = slope_res_2 - 2 * std_errs_2,
+                      Slope_upper = slope_res_2 + 2 * std_errs_2,
+                      Type = "Hierarchical")
+
+# Animated plot
+anim_df_2 <- rbind(unpooled_df_2, mod2_df_2)
+pooled_df_2 <- rbind(pooled_df_2, pooled_df_2) %>% 
+  mutate(Type = c("Unpooled", "Hierarchical"))
+
+# Create animated plot
+anim_plot_2 <- ggplot() +
+  geom_vline(mapping = aes(xintercept = pooled_df_2$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(data = anim_df_2, 
+                     mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  transition_states(Type, transition_length = 3, state_length = 1) +
+  labs(x = "Slope estimate", title = "Slope estimates by model type",
+       subtitle = "Model type: {closest_state}",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank())
+
+# Display animation
+animate(anim_plot_2, fps = 10, end_pause = 25)
+```
+
+## Discussion
+
+Initially, we were drawn to this dataset for two main reasons: (1) nested
+hierarchical structure and (2) simplicity that would allow for demonstration of
+key hierarchical modeling concepts. On both accounts, we encountered some 
+surprises. 
+
+It turns out that the `Division` and `League` add almost zero additional 
+information to a hierarchical model of winning percentage vs. pythagorean
+expectation (first seen in EDA and confirmed by fitting additional models that
+were not discussed). As a result, `Team` was the only grouping variable that
+we analyzed in any detail.
+
+Additionally, the very strong linear relationship between winning percentage
+and pythagorean expectation complicated what was expected to be a simple,
+textbook illustration of partial pooling in a hierarchical model. Based on
+this complication, we decided to evaluate the difference in modeling outcomes
+for a dataset with 20 seasons vs. 10 seasons and found that erratic hierarchical
+model behavior was more evident for the smaller sample size. This outcome 
+serves as a good reminder that skepticism about model results and a commitment 
+to performing model diagnostics are essential tools for data analysis.
+
+## References
+
+- Wikipedia [article](https://en.wikipedia.org/wiki/Pythagorean_expectation)
+on the pythagorean expectation, a key variable in my analysis
+- Fangraphs [website](https://www.fangraphs.com/leaders.aspx?pos=all&stats=pit&lg=all&qual=0&type=0&season=2019&month=0&season1=2000&ind=1&team=0,ts&rost=0&age=0&filter=&players=0&startdate=&enddate=):
+Data source for the analysis conducted in this "tool." The search terms listed 
+are for one of the two files used to create the final dataset. The other file
+can be generated by selecting "Batting" instead of "Pitching" among the options
+on the website
+- Course [website](http://www2.stat.duke.edu/courses/Fall20/sta523/) for Duke's
+STA 523 course in Fall 2020: I referred back to course notes on `gganimate` 
+to produce the animated plots of slope confidence intervals by team for the
+unpooled and hierarchical models
+
+## Code appendix
+
+```{r setup2, eval = F, echo = T}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+library(tidyverse)
+library(stringr)
+library(lme4)
+library(knitr)
+library(gganimate)
+library(ggdist)
+library(arm)
+library(patchwork)
+```
+
+```{r load-data2, eval = F, echo = T}
+# Load data files
+batting <- read_csv('Batting2.csv')
+pitching <- read_csv('Pitching2.csv')
+
+# Keep only columns relevant to this analysis
+batting_small <- batting %>% 
+  mutate(Runs_scored = R) %>% 
+  dplyr::select(Season, Team, Runs_scored)
+pitching_small <- pitching %>% 
+  mutate(Runs_allowed = R,
+         Win_perc = W / (W + L)) %>% 
+  dplyr::select(Season, Team, Runs_allowed, W, L, Win_perc)
+
+# Join data
+combined <- left_join(x = pitching_small, y = batting_small,
+                      by = c("Team", "Season"))
+
+# Recode some team names
+combined$Team <- recode(combined$Team, FLA = "MIA")
+combined$Team <- recode(combined$Team, ANA = "LAA")
+combined$Team <- recode(combined$Team, MON = "WSN")
+combined$Team <- recode(combined$Team, TBD = "TBR")
+
+### Add relevant features
+## Division
+combined <- combined %>% 
+  mutate(Division = case_when(
+    (Team == "ATL" | Team == "PHI" | Team == "MIA" |
+      Team == "WSN" | Team == "NYM") ~ "NL East",
+    (Team == "CIN" | Team == "STL" | Team == "CHC" |
+      Team == "MIL" | Team == "PIT") ~ "NL Central",
+    (Team == "LAD" | Team == "SDP" | Team == "SFG" |
+      Team == "COL" | Team == "ARI") ~ "NL West",
+    (Team == "BOS" | Team == "BAL" | Team == "TOR" |
+      Team == "TBR" | Team == "NYY") ~ "AL East",
+    (Team == "MIN" | Team == "CHW" | Team == "CLE" |
+      Team == "KCR" | Team == "DET") ~ "AL Central",
+    (Team == "HOU" | Team == "LAA" | Team == "TEX" |
+      Team == "SEA" | Team == "OAK") ~ "AL West"
+  ),
+  Team = as.factor(Team))
+# Account for fact that Astros switched divisions in 2013
+combined$Division <- ifelse(combined$Team == "HOU" & combined$Season < 2013,
+                            "NL Central", combined$Division)
+
+## League
+combined$League <- str_sub(combined$Division, start = 1, end = 2)
+
+## Pythagorean expectation
+combined$Pythagorean <- 
+  1 / (1 + (combined$Runs_allowed / combined$Runs_scored) ^ 1.83)
+
+## Remove unnecessary tables
+rm(batting, batting_small, pitching, pitching_small)
+```
+
+```{r aggregate-plot2, eval = F, echo = T}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. Pythagorean expectation") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r team-plot2, eval = F, echo = T}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~ Team) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. Pythagorean Expectation by Team") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r division-plot2, eval = F, echo = T}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~ Division) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. pythagorean expectation by division") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r League-plot2, eval = F, echo = T}
+ggplot(data = combined, mapping = aes(x = Pythagorean, y = Win_perc)) +
+  geom_point() + geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~ League) +
+  labs(x = "Pythagorean expectation", y = "Winning percentage",
+       title = "Winning Percentage vs. Pythagorean expectation by league") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r pooled-model2, eval = F, echo = T}
+mod1 <- lm(Win_perc ~ Pythagorean, data = combined)
+pooled_df <- data.frame(Intercept = coef(mod1)[[1]],
+                      Slope = coef(mod1)[[2]],
+                      Slope_se = summary(mod1)[[4]][4]) %>% 
+  mutate(Slope_lower = Slope - 2 * Slope_se,
+         Slope_upper = Slope + 2 * Slope_se)
+```
+
+```{r unpooled-models2, eval = F, echo = T}
+# Write function for unpooled regression (by team)
+unpooled <- function(team) {
+  dat <- combined %>% 
+    filter(Team == team)
+  mod <- lm(Win_perc ~ Pythagorean, data = dat)
+  df <- data.frame(Team = team,
+                   Intercept = coef(mod)[[1]],
+                   Slope = coef(mod)[[2]],
+                   Slope_se = summary(mod)[[4]][4]) %>% 
+    mutate(Slope_lower = Slope - 2 * Slope_se,
+           Slope_upper = Slope + 2 * Slope_se)
+  return(df)
+}
+
+# Define unique teams
+teams <- unique(combined$Team)
+
+# Find unpooled regression coefficients
+unpooled_df <- map_df(.x = teams, .f = unpooled)
+
+# Add identifier that will be helpful for animation
+unpooled_df <- unpooled_df %>% 
+  mutate(Type = "Unpooled")
+```
+
+```{r plot-pooled-vs-unpooled2, eval = F, echo = T}
+unpooled_plot <- ggplot() +
+  geom_vline(mapping = aes(xintercept = pooled_df$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(data = unpooled_df, 
+                     mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  labs(x = "Slope estimate", title = "Unpooled slope estimates",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  coord_cartesian(xlim = c(0.2, 1.7))
+```
+
+```{r team-random-effects2, eval = F, echo = T}
+# Fit model with random slopes and intercepts by Team
+mod2 <- lmer(Win_perc ~ (1 + Pythagorean | Team), data = combined)
+
+# Extract random effects and slope standard error
+std_errs <- se.ranef(mod2)[[1]][,2]
+slope_res <- ranef(mod2)[[1]][,2]
+intercept_res <- ranef(mod2)[[1]][,1]
+teams <- unique(combined$Team) %>% sort()
+
+# Create data frame that will be helpful for plotting
+mod2_df <- data.frame(Team = teams,
+                      Intercept = intercept_res,
+                      Slope = slope_res,
+                      Slope_se = std_errs,
+                      Slope_lower = slope_res - 2 * std_errs,
+                      Slope_upper = slope_res + 2 * std_errs,
+                      Type = "Hierarchical")
+
+# Plot result
+hierarchical_plot <- ggplot(data = mod2_df) +
+  geom_vline(mapping = aes(xintercept = pooled_df$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  labs(title = "Multilevel model slope estimates",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank()) +
+  coord_cartesian(xlim = c(0.2, 1.7))
+```
+
+```{r animated-plot2, eval = F, echo = T}
+# Create data frames for animated plotting
+anim_df <- rbind(unpooled_df, mod2_df)
+pooled_df <- rbind(pooled_df, pooled_df) %>% 
+  mutate(Type = c("Unpooled", "Hierarchical"))
+
+# Create animated plot
+anim_plot <- ggplot() +
+  geom_vline(mapping = aes(xintercept = pooled_df$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(data = anim_df, 
+                     mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  transition_states(Type, transition_length = 3, state_length = 1) +
+  labs(x = "Slope estimate", title = "Slope estimates by model type",
+       subtitle = "Model type: {closest_state}",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank())
+
+# Display animation
+animate(anim_plot, fps = 10, end_pause = 25)
+```
+
+```{r check-for-larger-ci2, eval = F, echo = T}
+unpooled_df2 <- unpooled_df %>% 
+  mutate(ci_width_unpooled = Slope_upper - Slope_lower) %>% 
+  dplyr::select(Team, Slope, ci_width_unpooled)
+mod2_df2 <- mod2_df %>% 
+  mutate(ci_width_hierarchy = Slope_upper - Slope_lower) %>% 
+  dplyr::select(Team, ci_width_hierarchy)
+compare_ci <- left_join(x = unpooled_df2, y = mod2_df2, by = "Team") %>% 
+  mutate(ind = ifelse(ci_width_hierarchy > ci_width_unpooled, 1, 0))
+```
+
+```{r qq-plot2, eval = F, echo = T}
+qqnorm(resid(mod2))
+```
+
+```{r filter-10-seasons2, eval = F, echo = T}
+combined_2 <- combined %>% 
+  filter(Season >= 2010)
+```
+
+```{r 10-seasons-plot2, eval = F, echo = T}
+# Pooled model
+mod1_2 <- lm(Win_perc ~ Pythagorean, data = combined_2)
+pooled_df_2 <- data.frame(Intercept = coef(mod1_2)[[1]],
+                      Slope = coef(mod1_2)[[2]],
+                      Slope_se = summary(mod1_2)[[4]][4]) %>% 
+  mutate(Slope_lower = Slope - 2 * Slope_se,
+         Slope_upper = Slope + 2 * Slope_se)
+
+# Unpooled model
+unpooled_2 <- function(team) {
+  dat <- combined_2 %>% 
+    filter(Team == team)
+  mod <- lm(Win_perc ~ Pythagorean, data = dat)
+  df <- data.frame(Team = team,
+                   Intercept = coef(mod)[[1]],
+                   Slope = coef(mod)[[2]],
+                   Slope_se = summary(mod)[[4]][4]) %>% 
+    mutate(Slope_lower = Slope - 2 * Slope_se,
+           Slope_upper = Slope + 2 * Slope_se)
+  return(df)
+}
+
+# Find unpooled regression coefficients
+unpooled_df_2 <- map_df(.x = teams, .f = unpooled_2) %>% 
+  mutate(Type = "Unpooled")
+
+# Hierarchical model
+mod2_2 <- lmer(Win_perc ~ (1 + Pythagorean | Team), data = combined_2)
+std_errs_2 <- se.ranef(mod2_2)[[1]][,2]
+slope_res_2 <- ranef(mod2_2)[[1]][,2]
+intercept_res_2 <- ranef(mod2_2)[[1]][,1]
+teams_2 <- unique(combined_2$Team) %>% sort()
+mod2_df_2 <- data.frame(Team = teams_2,
+                      Intercept = intercept_res_2,
+                      Slope = slope_res_2,
+                      Slope_se = std_errs_2,
+                      Slope_lower = slope_res_2 - 2 * std_errs_2,
+                      Slope_upper = slope_res_2 + 2 * std_errs_2,
+                      Type = "Hierarchical")
+
+# Animated plot
+anim_df_2 <- rbind(unpooled_df_2, mod2_df_2)
+pooled_df_2 <- rbind(pooled_df_2, pooled_df_2) %>% 
+  mutate(Type = c("Unpooled", "Hierarchical"))
+
+# Create animated plot
+anim_plot_2 <- ggplot() +
+  geom_vline(mapping = aes(xintercept = pooled_df_2$Slope, 
+                           color = "Pooled estimate"),
+                           linetype = "dashed") +
+  geom_pointinterval(data = anim_df_2, 
+                     mapping = aes(x = Slope, xmin = Slope_lower,
+                                   xmax = Slope_upper,
+                                   y = fct_reorder(Team, Slope))) +
+  transition_states(Type, transition_length = 3, state_length = 1) +
+  labs(x = "Slope estimate", title = "Slope estimates by model type",
+       subtitle = "Model type: {closest_state}",
+       color = "Legend") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank())
+
+# Display animation
+animate(anim_plot_2, fps = 10, end_pause = 25)
+```
