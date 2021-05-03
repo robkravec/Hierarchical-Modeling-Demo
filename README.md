@@ -2,38 +2,24 @@
 
 ## Description
 
-My “tool” was originally intended to demonstrate two key concepts:
+This project was originally intended to be used as an educational tool to demonstrate two key concepts:
 
 - Effects of nested hierarchical structures
 - Fundamentals of hierarchical modeling, including a comparison of a pooled model, unpooled models, and a hierarchical model (with partial pooling)
-- 
+ 
 While performing my analyses, I found that only one level of grouping present in the data actually accounted for any non-negligible variance in the response. As a result, my tool discusses the concept of nested hierarchical structures but only examines one grouping level in great detail.
-Secondly, some of the model results presented in my “tool” ended up being a bit counterintuitive. Rather than just fitting the model and calling it a day, I decided to leverage the educational opportunity, discussing what may have led to the results, performing model diagnostics, and testing out how the results would be impacted by a change in sample size.
-As a result, I would say that an additional concept illustrated by my “tool” is the importance of skepticism about model results in hierarchical (and non-hierarchical) modeling situations.
+Secondly, some of the model results presented in the analysis ended up being a bit counterintuitive, providing an opportunity to discuss what may have led to the results, perform model diagnostics, and test out how the results would be impacted by a change in sample size.
 
 The concepts mentioned above are illustrated through the analysis of a
-dataset containing information about 20 Major League Baseball (MLB) seasons. 
-This analysis provides significant narrative about data processing, exploratory 
-data analysis (EDA), and model results, such that the tool may be characterized
-as a "clear example illustration" in the words of the assignment. I also 
-include some overall explanations / commentary on the principles of hierarchical
-modeling. 
-
-Additionally, I was motivating by Michael Clark's visualizations (linked in
-the assignment) to produce some animated plots of my own. As a result, I 
-used the `gganimate` package to show how random slope estimates in a 
-hierarchical model differed from slope estimates in unpooled linear regression
-models. It is my hope that the animated plots will help to capture the 
-interest of and provide relevant information to those who may be unfamiliar 
-with hierarchical modeling.
-
-While I ultimately plan to turn my "tool" into a published blog post or at 
-least create a well maintained Github repository to share the work, I have
-attached the "tool" as an html file for the purpose of this assignment. I know 
-that pdf is often the preferred file format in this course, but the
-animated plots do not work properly in pdf, so I apologize for any inconvenience.
+dataset containing information about 20 Major League Baseball (MLB) seasons. It is my hope that the main analysis output (animated plots to show the difference between hierachical models vs. unpooled linear regression models) will help to capture the interest of and provide relevant information to those who may be unfamiliar with hierarchical modeling.
 
 <img src="hierarchical_anim_plot.gif?raw=true"/>
+
+## Core competencies on display
+
+- Explaining technical topics in easy-to-understand language
+- Building and interpreting hierarchical models, including troubleshooting unintuitive results
+- Generating animated plots
 
 ## References / Acknowledgements
 
