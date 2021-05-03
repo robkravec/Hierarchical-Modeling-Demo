@@ -23,7 +23,7 @@ dataset containing information about 20 Major League Baseball (MLB) seasons. It 
 
 ## References / Acknowledgements
 
-This project was completed as port of STA 610 (Multilevel and Hierarchical Models) at Duke, taught by Professor Michael Akande.
+This project was completed as part of STA 610 (Multilevel and Hierarchical Models) at Duke, taught by Professor Michael Akande.
 
 - [Wikipedia](https://en.wikipedia.org/wiki/Pythagorean_expectation) article
 on the pythagorean expectation, a key variable in my analysis
