@@ -15,7 +15,7 @@ dataset containing information about 20 Major League Baseball (MLB) seasons. It 
 
 <img src="hierarchical_anim_plot.gif?raw=true"/>
 
-## Core competencies on display
+## Skills on display
 
 - Explaining technical topics in easy-to-understand language
 - Building and interpreting hierarchical models, including troubleshooting unintuitive results
