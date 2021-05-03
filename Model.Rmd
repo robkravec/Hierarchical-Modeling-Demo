@@ -1,7 +1,7 @@
 ---
 title: "Hierarchical Modeling With Animated Plots"
 author: "Rob Kravec"
-date: "4/22/2021"
+date: "5/3/2021"
 output:
   html_document:
     df_print: paged
